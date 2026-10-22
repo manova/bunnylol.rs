@@ -48,6 +48,21 @@ enum TemplatePart {
 const CAPTURE_ENCODING: &percent_encoding::AsciiSet =
     &NON_ALPHANUMERIC.remove(b'-').remove(b'_').remove(b'~');
 
+// RFC 3986 reserved and unreserved characters are safe in a serialized URI.
+// Keep '%' so already encoded capture bytes are not encoded a second time.
+const URI_ENCODING: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'<')
+    .add(b'>')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}')
+    .add(b'|')
+    .add(b'^')
+    .add(b'\\');
+const FRAGMENT_ENCODING: &percent_encoding::AsciiSet = &URI_ENCODING.add(b'#');
+
 fn has_dot_segment(url: &str) -> bool {
     let path = url.split(['?', '#']).next().unwrap_or(url);
     path.split('/').any(|segment| {
@@ -65,9 +80,18 @@ impl TryFrom<PatternBindingConfig> for PatternBinding {
         if raw.name.trim().is_empty() {
             return Err(fail("name must not be empty"));
         }
-        let regex = RegexBuilder::new(&format!(r"\A(?:{})\z", raw.pattern))
+        // Validate standalone syntax first: unmatched groups must not balance
+        // against our wrapper and turn full-input anchors into alternatives.
+        RegexBuilder::new(&raw.pattern)
             .size_limit(1 << 20)
             .build()
+            .map_err(|e| fail(&format!("invalid pattern: {e}")))?;
+        let compile = |pattern: &str| RegexBuilder::new(pattern).size_limit(1 << 20).build();
+        let regex = compile(&format!(r"\A(?:{})\z", raw.pattern))
+            // A trailing verbose-mode comment can consume the closing wrapper.
+            // Retry with a newline only on failure; adding one unconditionally
+            // would change patterns where verbose mode is disabled.
+            .or_else(|_| compile(&format!("\\A(?:{}\n)\\z", raw.pattern)))
             .map_err(|e| fail(&format!("invalid pattern: {e}")))?;
 
         // Require an explicit, literal HTTP(S) authority. Captures may only
@@ -194,8 +218,15 @@ impl PatternBinding {
         if has_dot_segment(&output) {
             return None;
         }
-        let resolved = Url::parse(&output).ok()?;
-        (resolved.origin() == self.destination.origin()).then_some(output)
+        let mut resolved = Url::parse(&output).ok()?;
+        // Only the first '#' may delimit the fragment in an RFC 3986 URI.
+        // Url accepts additional literal hashes, while HTTP redirect URIs do not.
+        if let Some(fragment) = resolved.fragment() {
+            let fragment = utf8_percent_encode(fragment, FRAGMENT_ENCODING).to_string();
+            resolved.set_fragment(Some(&fragment));
+        }
+        (resolved.origin() == self.destination.origin())
+            .then(|| utf8_percent_encode(resolved.as_str(), URI_ENCODING).to_string())
     }
 }
 
@@ -285,6 +316,56 @@ mod tests {
             parsed.query_pairs().collect::<Vec<_>>(),
             vec![("q".into(), input.into()), ("fixed".into(), "yes".into())]
         );
+    }
+
+    #[test]
+    fn invalid_regex_cannot_escape_anchoring_wrapper() {
+        assert!(
+            rule(
+                r"(?P<id>ENG-[0-9]+))|(?:OCT-[0-9]+",
+                "https://example.com/{id}",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn verbose_trailing_comments_preserve_full_input_matching() {
+        let binding = rule(
+            "(?x) (?P<id>ENG-[0-9]+) # ticket",
+            "https://example.com/{id}",
+        )
+        .unwrap();
+        assert_eq!(
+            binding.resolve("ENG-123"),
+            Some("https://example.com/ENG-123".into())
+        );
+        assert!(binding.resolve("ENG-123 extra").is_none());
+        let literal = rule("(?P<id>ENG-[0-9]+) ", "https://example.com/{id}").unwrap();
+        assert!(literal.resolve("ENG-123").is_none());
+        assert!(literal.resolve("ENG-123 ").is_some());
+    }
+
+    #[test]
+    fn literal_urls_are_serialized_as_valid_ascii_uris() {
+        for (template, expected) in [
+            (
+                "https://example.com/雪/{id}",
+                "https://example.com/%E9%9B%AA/42",
+            ),
+            ("https://例え.com/{id}", "https://xn--r8jz45g.com/42"),
+            (
+                "https://example.com/a|b^{id}?q=|^#|^",
+                "https://example.com/a%7Cb%5E42?q=%7C%5E#%7C%5E",
+            ),
+            (
+                "https://example.com/{id}#a#b",
+                "https://example.com/42#a%23b",
+            ),
+        ] {
+            let binding = rule("(?P<id>[0-9]+)", template).unwrap();
+            assert_eq!(binding.resolve("42"), Some(expected.into()));
+        }
     }
 
     #[test]

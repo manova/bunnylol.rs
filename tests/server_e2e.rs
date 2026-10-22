@@ -201,6 +201,26 @@ url = 'https://example.com/item/{value}?q={value}'
 name = 'command-collision'
 pattern = '(?P<command>gh|work|ig|r/rust|\$AAPL|alias)'
 url = 'https://wrong.example/{command}'
+[[pattern_bindings]]
+name = 'unicode-path'
+pattern = 'snow-(?P<id>[0-9]+)'
+url = 'https://example.com/雪/{id}'
+[[pattern_bindings]]
+name = 'idn'
+pattern = 'idn-(?P<id>[0-9]+)'
+url = 'https://例え.com/{id}'
+[[pattern_bindings]]
+name = 'uri-punctuation'
+pattern = 'pipe-(?P<id>[0-9]+)'
+url = 'https://example.com/a|b^{id}?q=|^#|^'
+[[pattern_bindings]]
+name = 'verbose-comment'
+pattern = '(?x) verbose-(?P<id>[0-9]+) # ticket'
+url = 'https://example.com/{id}'
+[[pattern_bindings]]
+name = 'fragment-hash'
+pattern = 'fragment-(?P<id>[0-9]+)'
+url = 'https://example.com/{id}#a#b'
 "#;
     fs::create_dir_all(xdg_dir.join("bunnylol")).unwrap();
     fs::write(config_path(&xdg_dir), fixture).unwrap();
@@ -219,6 +239,12 @@ url = 'https://wrong.example/{command}'
         "$AAPL",
         "alias",
         "value://evil.test/a?x=1&y=雪#frag%",
+        "snow-42",
+        "idn-42",
+        "pipe-42",
+        "verbose-42",
+        "verbose-42 extra words",
+        "fragment-42",
     ] {
         let output = Command::new(assert_cmd::cargo::cargo_bin!("bunnylol"))
             .env("XDG_CONFIG_HOME", &xdg_dir)
@@ -258,6 +284,10 @@ url = 'https://wrong.example/{command}'
     assert_eq!(ticket_url(), "https://updated.example/ENG-1234");
     assert!(http_get(port, "/").unwrap().contains("updated.example"));
     for (i, invalid) in [
+        updated.replace(
+            "(?P<ticket>ENG-[0-9]+)",
+            "(?P<ticket>ENG-[0-9]+))|(?:OCT-[0-9]+",
+        ),
         updated.replace("(?P<ticket>ENG-[0-9]+)", "["),
         updated.replace("https://updated.example/{ticket}", "https://{ticket}/"),
         updated.replace(
