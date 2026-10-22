@@ -133,25 +133,32 @@ impl BunnylolCommandRegistry {
     ///   2. User `[user_bindings]` with `override = true`
     ///   3. Built-in registered commands
     ///   4. User `[user_bindings]` without `override`
-    ///   5. Default search engine fallback
+    ///   5. Ordered full-input pattern bindings
+    ///   6. Default search engine fallback
     ///
     /// `Command` bindings rewrite the input and dispatch into the registry
     /// **exactly once** with [`Self::process_command_no_user_bindings`] — they
-    /// can resolve to a built-in or the search fallback, but cannot re-enter
-    /// another user binding. This prevents cycles.
+    /// can resolve to a built-in, a URL pattern or the search fallback, but
+    /// cannot re-enter another command alias. This prevents cycles.
     pub fn process_command(command: &str, full_args: &str) -> String {
+        let config = get_global_config().unwrap_or_default();
+        Self::process_command_with_config(command, full_args, &config)
+    }
+
+    /// Resolve against one configuration snapshot, shared by CLI and server.
+    pub fn process_command_with_config(
+        command: &str,
+        full_args: &str,
+        cfg: &crate::config::BunnylolConfig,
+    ) -> String {
         // Tier 1: prefix handlers
         if let Some(url) = Self::process_prefix_commands(command, full_args) {
             return url;
         }
 
-        let cfg = get_global_config();
-
         // Tier 2: user bindings with override = true
-        if let Some(ref cfg) = cfg
-            && let Some((resolved, true)) = cfg.resolve_user_binding(command, full_args)
-        {
-            return Self::dispatch_resolved(resolved);
+        if let Some((resolved, true)) = cfg.resolve_user_binding(command, full_args) {
+            return Self::dispatch_resolved(resolved, cfg);
         }
 
         // Tier 3: built-in commands
@@ -161,23 +168,31 @@ impl BunnylolCommandRegistry {
         }
 
         // Tier 4: user bindings without override
-        if let Some(ref cfg) = cfg
-            && let Some((resolved, false)) = cfg.resolve_user_binding(command, full_args)
-        {
-            return Self::dispatch_resolved(resolved);
+        if let Some((resolved, false)) = cfg.resolve_user_binding(command, full_args) {
+            return Self::dispatch_resolved(resolved, cfg);
         }
 
-        // Tier 5: default search fallback
-        let engine = cfg
-            .map(|c| c.default_search)
-            .unwrap_or_else(|| "google".to_string());
-        crate::commands::search_url(&engine, full_args)
+        Self::resolve_fallback(full_args, cfg)
+    }
+
+    fn resolve_fallback(full_args: &str, cfg: &crate::config::BunnylolConfig) -> String {
+        // Tier 5: ordered patterns, immediately before search.
+        if let Some(url) = cfg.resolve_pattern_binding(full_args) {
+            return url;
+        }
+
+        // Tier 6: default search fallback
+        crate::commands::search_url(&cfg.default_search, full_args)
     }
 
     /// Same as [`Self::process_command`] but **skips user bindings entirely**.
     /// Used to dispatch a `Command` binding's rewritten string without
     /// recursing back into another `[user_bindings]` entry.
-    fn process_command_no_user_bindings(command: &str, full_args: &str) -> String {
+    fn process_command_no_user_bindings(
+        command: &str,
+        full_args: &str,
+        cfg: &crate::config::BunnylolConfig,
+    ) -> String {
         if let Some(url) = Self::process_prefix_commands(command, full_args) {
             return url;
         }
@@ -187,18 +202,18 @@ impl BunnylolCommandRegistry {
             return handler(full_args);
         }
 
-        let engine = get_global_config()
-            .map(|c| c.default_search)
-            .unwrap_or_else(|| "google".to_string());
-        crate::commands::search_url(&engine, full_args)
+        Self::resolve_fallback(full_args, cfg)
     }
 
-    fn dispatch_resolved(resolved: crate::config::ResolvedBinding) -> String {
+    fn dispatch_resolved(
+        resolved: crate::config::ResolvedBinding,
+        cfg: &crate::config::BunnylolConfig,
+    ) -> String {
         match resolved {
             crate::config::ResolvedBinding::Url(url) => url,
             crate::config::ResolvedBinding::Command(rewritten) => {
                 let cmd_word = crate::utils::get_command_from_query_string(&rewritten);
-                Self::process_command_no_user_bindings(cmd_word, &rewritten)
+                Self::process_command_no_user_bindings(cmd_word, &rewritten, cfg)
             }
         }
     }

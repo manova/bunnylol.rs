@@ -385,3 +385,82 @@ work = "gh mycompany/repo"
         .stderr(predicate::str::contains("[aliases]"))
         .stderr(predicate::str::contains("deprecated"));
 }
+
+#[test]
+#[cfg(feature = "cli")]
+fn test_identifier_pattern_bindings_cli() {
+    let xdg = write_test_config(
+        "identifier-patterns",
+        r#"
+default_search = 'ddg'
+[history]
+enabled = false
+[user_bindings]
+work = { url = 'https://work.example/' }
+gh = { command = 'gh manova/bunnylol.rs', override = true }
+[[pattern_bindings]]
+name = 'ticket'
+pattern = '(?P<ticket>ENG-[0-9]+)'
+url = 'https://tracker.example/{ticket}'
+[[pattern_bindings]]
+name = 'pr'
+pattern = '#(?P<number>[0-9]+)'
+url = 'https://github.com/example/repo/pull/{number}'
+[[pattern_bindings]]
+name = 'overlap'
+pattern = '(?P<ticket>ENG-[0-9]+)'
+url = 'https://overlap.example/{ticket}'
+[[pattern_bindings]]
+name = 'command-collision'
+pattern = '(?P<command>gh|work|ig|r/rust|\$AAPL|alias)'
+url = 'https://wrong.example/{command}'
+"#,
+    );
+    for (input, output) in [
+        ("ENG-1234", "https://tracker.example/ENG-1234\n"),
+        ("#9164", "https://github.com/example/repo/pull/9164\n"),
+        ("work", "https://work.example/\n"),
+        ("gh", "https://github.com/manova/bunnylol.rs\n"),
+        ("ig", "https://www.instagram.com\n"),
+        ("r/rust", "https://www.reddit.com/r/rust/\n"),
+        ("$AAPL", "https://finance.yahoo.com/quote/AAPL/\n"),
+    ] {
+        assert_dry_run_stdout(&xdg, &[input], output);
+    }
+    for input in ["look up ENG-1234", "ENG-1234 ", " ENG-1234", "#9164 extra"] {
+        let expected = bunnylol::commands::search_url("ddg", input) + "\n";
+        assert_dry_run_stdout(&xdg, &[input], &expected);
+    }
+    let mut list = assert_cmd::cargo::cargo_bin_cmd!("bunnylol");
+    list.env("XDG_CONFIG_HOME", &xdg)
+        .arg("bindings")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Pattern bindings"))
+        .stdout(predicate::str::contains("ticket"))
+        .stdout(predicate::str::contains("https://tracker.example/{ticket}"));
+    fs::remove_dir_all(xdg).unwrap();
+}
+
+#[test]
+#[cfg(feature = "cli")]
+fn test_invalid_identifier_pattern_config_exits_without_resolving() {
+    for rule in [
+        "pattern = '['\nurl = 'https://example.com/'",
+        "pattern = '(?P<id>.+)'\nurl = 'https://{id}/'",
+        "pattern = '(?P<id>.+)'\nurl = 'https://example.com/{missing}'",
+    ] {
+        let xdg = write_test_config(
+            "invalid-pattern",
+            &format!("[[pattern_bindings]]\nname = 'invalid'\n{rule}\n"),
+        );
+        let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bunnylol");
+        cmd.env("XDG_CONFIG_HOME", &xdg)
+            .args(["--dry-run", "ENG-1234"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("Invalid configuration"))
+            .stdout(predicate::str::is_empty());
+        fs::remove_dir_all(xdg).unwrap();
+    }
+}
