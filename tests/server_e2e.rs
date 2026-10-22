@@ -167,3 +167,118 @@ fn test_server_reloads_config_mtime_and_keeps_last_valid_config() {
 
     fs::remove_dir_all(&xdg_dir).ok();
 }
+
+#[test]
+#[cfg(all(feature = "server", feature = "cli"))]
+fn test_pattern_cli_server_parity_and_reload_recovery() {
+    let xdg_dir = unique_test_dir("patterns-parity");
+    let port = free_port();
+    let fixture = r#"
+default_search = 'ddg'
+[history]
+enabled = false
+[user_bindings]
+work = { url = 'https://work.example/' }
+alias = { command = 'ENG-100' }
+gh = { command = 'gh manova', override = true }
+[[pattern_bindings]]
+name = 'ticket'
+pattern = '(?P<ticket>ENG-[0-9]+)'
+url = 'https://tracker.example/{ticket}'
+[[pattern_bindings]]
+name = 'overlap'
+pattern = '(?P<ticket>ENG-[0-9]+)'
+url = 'https://overlap.example/{ticket}'
+[[pattern_bindings]]
+name = 'pr'
+pattern = '#(?P<number>[0-9]+)'
+url = 'https://github.com/example/repo/pull/{number}'
+[[pattern_bindings]]
+name = 'encoding'
+pattern = 'value:(?P<value>.+)'
+url = 'https://example.com/item/{value}?q={value}'
+[[pattern_bindings]]
+name = 'command-collision'
+pattern = '(?P<command>gh|work|ig|r/rust|\$AAPL|alias)'
+url = 'https://wrong.example/{command}'
+"#;
+    fs::create_dir_all(xdg_dir.join("bunnylol")).unwrap();
+    fs::write(config_path(&xdg_dir), fixture).unwrap();
+    let mut server = spawn_server(&xdg_dir, port);
+    wait_for_server(&mut server, port);
+
+    for input in [
+        "ENG-1234",
+        "#9164",
+        "look up ENG-1234",
+        "ENG-1234 ",
+        "gh",
+        "work",
+        "ig",
+        "r/rust",
+        "$AAPL",
+        "alias",
+        "value://evil.test/a?x=1&y=雪#frag%",
+    ] {
+        let output = Command::new(assert_cmd::cargo::cargo_bin!("bunnylol"))
+            .env("XDG_CONFIG_HOME", &xdg_dir)
+            .args(["--dry-run", input])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let cli_url = String::from_utf8(output.stdout).unwrap().trim().to_string();
+        let encoded = bunnylol::utils::url_encoding::encode_url_special_char(input);
+        let server_url = redirect_location(&http_get(port, &format!("/?cmd={encoded}")).unwrap());
+        assert_eq!(server_url, cli_url, "CLI/server mismatch for {input:?}");
+        if input == "ENG-1234" {
+            assert_eq!(server_url, "https://tracker.example/ENG-1234");
+        }
+        if input == "alias" {
+            assert_eq!(server_url, "https://tracker.example/ENG-100");
+        }
+    }
+    let page = http_get(port, "/").unwrap();
+    assert!(page.contains("Pattern Bindings"));
+    assert!(page.contains("ticket"));
+    assert!(page.contains("tracker.example"));
+
+    // Force distinct mtimes without depending on the filesystem's clock resolution.
+    let rewrite = |text: &str, tick: u64| {
+        fs::write(config_path(&xdg_dir), text).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(config_path(&xdg_dir))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + Duration::from_secs(tick))
+            .unwrap();
+    };
+    let updated = fixture.replace("tracker.example", "updated.example");
+    rewrite(&updated, 2);
+    let ticket_url = || redirect_location(&http_get(port, "/?cmd=ENG-1234").unwrap());
+    assert_eq!(ticket_url(), "https://updated.example/ENG-1234");
+    assert!(http_get(port, "/").unwrap().contains("updated.example"));
+    for (i, invalid) in [
+        updated.replace("(?P<ticket>ENG-[0-9]+)", "["),
+        updated.replace("https://updated.example/{ticket}", "https://{ticket}/"),
+        updated.replace(
+            "https://updated.example/{ticket}",
+            "https://updated.example/{missing}",
+        ),
+    ]
+    .iter()
+    .enumerate()
+    {
+        rewrite(invalid, 4 + i as u64);
+        assert_eq!(ticket_url(), "https://updated.example/ENG-1234");
+        let page = http_get(port, "/").unwrap();
+        assert!(page.contains("updated.example"));
+    }
+    let recovered = fixture.replace("tracker.example", "recovered.example");
+    rewrite(&recovered, 9);
+    assert_eq!(ticket_url(), "https://recovered.example/ENG-1234");
+    rewrite("[history]\nenabled = false\n", 10);
+    assert!(ticket_url().starts_with("https://www.google.com/search?q="));
+    assert!(!http_get(port, "/").unwrap().contains("Pattern Bindings"));
+    drop(server);
+    fs::remove_dir_all(xdg_dir).unwrap();
+}

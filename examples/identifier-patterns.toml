@@ -1,0 +1,26 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+default_search = "google"
+
+[history]
+enabled = false
+
+[server]
+address = "127.0.0.1"
+port = 18766
+log_level = "off"
+
+[[pattern_bindings]]
+name = "tickets"
+pattern = '(?P<ticket>ENG-[0-9]+)'
+url = "https://tracker.example.com/browse/{ticket}"
+description = "Engineering ticket"
+
+[[pattern_bindings]]
+name = "pull-requests"
+pattern = '#(?P<number>[0-9]+)'
+url = "https://github.com/example/repo/pull/{number}"
+description = "Pull request in the configured repository"

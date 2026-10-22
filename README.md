@@ -180,7 +180,37 @@ $ bunnylol blog
 
 Legacy `[aliases]` entries are still read for compatibility, but they are deprecated. When bunnylol loads a config with `[aliases]`, it migrates those entries into `[user_bindings]` and removes the old `[aliases]` section. Comments outside `[aliases]` are preserved.
 
-#### 3. **Custom Default Search Engine**
+#### 3. **Identifier Pattern Bindings**
+
+Opt in to shortcuts that already identify a destination, without a command prefix:
+
+```toml
+[[pattern_bindings]]
+name = "tickets"
+pattern = '(?P<ticket>ENG-[0-9]+)'
+url = "https://tracker.example.com/browse/{ticket}"
+description = "Engineering ticket"
+
+[[pattern_bindings]]
+name = "pull-requests"
+pattern = '#(?P<number>[0-9]+)'
+url = "https://github.com/example/repo/pull/{number}"
+```
+
+`ENG-1234` resolves to the ticket and `#9164` to the configured pull request.
+The entire input must match: `look up ENG-1234` still searches. Existing prefix
+handlers, built-in commands, and user bindings retain their precedence. Patterns
+are tried in declaration order immediately before search fallback.
+
+Rules are validated on load and hot reload. Invalid edits leave the server's
+last valid configuration active. Both `bunnylol bindings` and the web bindings
+page show the rules in their evaluation order. Configurations without patterns
+keep their existing behavior.
+
+See [pattern bindings](docs/pattern-bindings.md) for template syntax, validation,
+encoding details, and an isolated local trial.
+
+#### 4. **Custom Default Search Engine**
 
 Override Google as the fallback search engine:
 
@@ -190,7 +220,7 @@ default_search = "ddg"  # Options: "google" (default), "ddg", "bing"
 
 When a command isn't recognized, it will search using your configured engine instead of Google.
 
-#### 4. **Command History Tracking**
+#### 5. **Command History Tracking**
 
 Track your recently used commands (enabled by default):
 

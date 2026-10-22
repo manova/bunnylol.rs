@@ -18,6 +18,7 @@ static LANDING_PAGE_HTML_CACHE: OnceLock<RwLock<Option<LandingPageHtmlCache>>> =
 struct LandingPageCacheKey {
     display_url: String,
     user_bindings: Vec<BindingData>,
+    pattern_bindings: Vec<BindingData>,
 }
 
 struct LandingPageHtmlCache {
@@ -29,9 +30,23 @@ struct LandingPageHtmlCache {
 pub fn render_landing_page_html(config: &BunnylolConfig) -> String {
     let display_url = config.server.get_display_url();
     let user_bindings: Vec<BindingData> = collect_user_bindings(config);
+    let pattern_bindings: Vec<BindingData> = config
+        .pattern_bindings
+        .iter()
+        .enumerate()
+        .map(|(i, rule)| BindingData {
+            command: format!("{}. {}", i + 1, rule.name()),
+            description: rule
+                .description()
+                .unwrap_or("Full-input pattern binding")
+                .to_string(),
+            example: format!("{} → {}", rule.pattern(), rule.url()),
+        })
+        .collect();
     let key = LandingPageCacheKey {
         display_url: display_url.clone(),
         user_bindings: user_bindings.clone(),
+        pattern_bindings: pattern_bindings.clone(),
     };
 
     let cache = LANDING_PAGE_HTML_CACHE.get_or_init(|| RwLock::new(None));
@@ -44,7 +59,7 @@ pub fn render_landing_page_html(config: &BunnylolConfig) -> String {
         }
     }
 
-    let html = render_landing_page_html_uncached(display_url, user_bindings);
+    let html = render_landing_page_html_uncached(display_url, user_bindings, pattern_bindings);
     let mut cached = cache.write().expect("landing page cache lock poisoned");
     if let Some(cached) = cached.as_ref()
         && cached.key == key
@@ -62,12 +77,14 @@ pub fn render_landing_page_html(config: &BunnylolConfig) -> String {
 fn render_landing_page_html_uncached(
     display_url: String,
     user_bindings: Vec<BindingData>,
+    pattern_bindings: Vec<BindingData>,
 ) -> String {
     let body_content = Owner::new().with(|| {
         view! {
             <LandingPage
                 server_display_url=display_url.clone()
                 user_bindings=user_bindings.clone()
+                pattern_bindings=pattern_bindings.clone()
             />
         }
         .to_html()
@@ -237,6 +254,7 @@ fn BindingCard(binding: BindingData) -> impl IntoView {
 pub fn LandingPage(
     server_display_url: String,
     #[prop(default = Vec::new())] user_bindings: Vec<BindingData>,
+    #[prop(default = Vec::new())] pattern_bindings: Vec<BindingData>,
 ) -> impl IntoView {
     let mut bindings: Vec<BindingData> = BunnylolCommandRegistry::get_all_commands()
         .iter()
@@ -269,6 +287,7 @@ pub fn LandingPage(
             >
                 "bunnylol"
             </h1>
+
             <div
                 style:text-align="center"
                 style:margin-bottom="20px"
@@ -481,6 +500,20 @@ pub fn LandingPage(
                     </Show>
                 }
             }
+
+            {(!pattern_bindings.is_empty()).then(|| view! {
+                <section style:margin-bottom="40px" aria-label="Pattern Bindings">
+                    <h2 style:text-align="center" style:color="var(--text-medium)" style:margin-bottom="20px">"Pattern Bindings"</h2>
+                    <p style:text-align="center" style:margin-bottom="20px">"Full input only, in declaration order, before search fallback."</p>
+                    <div style:display="grid" style:grid-template-columns="repeat(auto-fill, minmax(350px, 1fr))" style:gap="20px">
+                        <For
+                            each=move || pattern_bindings.clone()
+                            key=|binding| binding.command.clone()
+                            children=|binding| view! { <BindingCard binding=binding /> }
+                        />
+                    </div>
+                </section>
+            })}
 
             <div
                 style:text-align="center"

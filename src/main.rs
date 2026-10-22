@@ -247,7 +247,7 @@ fn execute_command(
     // Extract command and process. Aliases are handled inside process_command
     // via the unified [user_bindings] table — see Q2 in the refactor plan.
     let command = utils::get_command_from_query_string(&full_args);
-    let url = BunnylolCommandRegistry::process_command(command, &full_args);
+    let url = BunnylolCommandRegistry::process_command_with_config(command, &full_args, config);
 
     // Print URL
     println!("{}", url);
@@ -366,15 +366,43 @@ fn print_commands() {
     println!("\n{}\n", table);
 
     // Append user-defined bindings as a second table, if any.
-    if let Some(cfg) = bunnylol::config::get_global_config()
-        && !cfg.user_bindings.is_empty()
-    {
-        print_user_bindings_table(&cfg);
+    if let Some(cfg) = bunnylol::config::get_global_config() {
+        if !cfg.user_bindings.is_empty() {
+            print_user_bindings_table(&cfg);
+        }
+        if !cfg.pattern_bindings.is_empty() {
+            print_pattern_bindings_table(&cfg);
+        }
     }
 
     println!("💡 Tip: Use 'bunnylol <command>' to open URLs in your browser");
     println!("   Example: bunnylol ig reels");
     println!("   Use --dry-run to preview the URL without opening it\n");
+}
+
+#[cfg(feature = "cli")]
+fn print_pattern_bindings_table(cfg: &BunnylolConfig) {
+    #[derive(tabled::Tabled)]
+    struct PatternRow {
+        order: usize,
+        name: String,
+        pattern: String,
+        target: String,
+        description: String,
+    }
+    let rows = cfg
+        .pattern_bindings
+        .iter()
+        .enumerate()
+        .map(|(i, rule)| PatternRow {
+            order: i + 1,
+            name: rule.name().to_string(),
+            pattern: rule.pattern().to_string(),
+            target: rule.url().to_string(),
+            description: rule.description().unwrap_or("—").to_string(),
+        });
+    println!("Pattern bindings (in declaration order; tried before search):");
+    println!("{}\n", Table::new(rows).with(Style::rounded()));
 }
 
 /// Print `[user_bindings]` as a separate table beneath the built-ins.

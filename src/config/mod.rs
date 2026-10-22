@@ -13,8 +13,10 @@ use std::sync::{OnceLock, RwLock};
 use std::time::SystemTime;
 
 mod alias_migration;
+mod pattern_bindings;
 mod user_bindings;
 
+pub use pattern_bindings::PatternBinding;
 use user_bindings::format_user_binding_toml;
 pub use user_bindings::{BindingConflict, ResolvedBinding, UserBinding};
 
@@ -75,6 +77,10 @@ pub struct BunnylolConfig {
     #[serde(default)]
     pub user_bindings: HashMap<String, UserBinding>,
 
+    /// Ordered full-input identifier patterns, tried immediately before search.
+    #[serde(default, deserialize_with = "pattern_bindings::deserialize_patterns")]
+    pub pattern_bindings: Vec<PatternBinding>,
+
     /// Command history settings
     #[serde(default)]
     pub history: HistoryConfig,
@@ -92,6 +98,7 @@ impl Default for BunnylolConfig {
             stock_provider: default_stock_provider(),
             aliases: HashMap::new(),
             user_bindings: HashMap::new(),
+            pattern_bindings: Vec::new(),
             history: HistoryConfig::default(),
             server: ServerConfig::default(),
         }
@@ -519,6 +526,19 @@ impl BunnylolConfig {
             None => "# server_display_url = \"bunny.example.com\"".to_string(),
         };
 
+        #[derive(Serialize)]
+        struct PatternSection<'a> {
+            pattern_bindings: &'a [PatternBinding],
+        }
+        let pattern_bindings_content = if self.pattern_bindings.is_empty() {
+            "# [[pattern_bindings]]\n# name = \"tickets\"\n# pattern = '(?P<ticket>ENG-[0-9]+)'\n# url = \"https://tracker.example.com/browse/{ticket}\"\n".to_string()
+        } else {
+            toml::to_string(&PatternSection {
+                pattern_bindings: &self.pattern_bindings,
+            })
+            .expect("validated pattern bindings serialize to TOML")
+        };
+
         format!(
             r#"# Bunnylol Configuration File
 # https://github.com/facebook/bunnylol.rs
@@ -575,6 +595,9 @@ port = {}
 address = "{}"
 log_level = "{}"
 {}
+
+# Optional full-input patterns, evaluated in declaration order before search.
+{}
 "#,
             browser_line,
             self.default_search,
@@ -586,6 +609,7 @@ log_level = "{}"
             self.server.address,
             self.server.log_level,
             server_display_url_line,
+            pattern_bindings_content,
         )
     }
 }
